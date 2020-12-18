@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -17,7 +18,6 @@ import (
 	"github.com/Shopify/sarama"
 	kazoo "github.com/krallistic/kazoo-go"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	plog "github.com/prometheus/common/log"
 	"github.com/prometheus/common/version"
 	"github.com/rcrowley/go-metrics"
@@ -77,6 +77,9 @@ type kafkaOpts struct {
 	uriZookeeper             []string
 	labels                   string
 	metadataRefreshInterval  string
+	principal                string // Username@Realm
+	keytab                   string
+	krb5                     string
 }
 
 // CanReadCertAndKey returns true if the certificate and key files already exists,
@@ -134,10 +137,21 @@ func NewExporter(opts kafkaOpts, topicFilter string, groupFilter string) (*Expor
 		case "scram-sha256":
 			config.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA256} }
 			config.Net.SASL.Mechanism = sarama.SASLMechanism(sarama.SASLTypeSCRAMSHA256)
-
 		case "plain":
+		case "gssapi":
+			//sarama.NewKerberosClient()
+			//kerverosConfig := sarama.config()
+			config.Net.SASL.Mechanism = sarama.SASLTypeGSSAPI
+			config.Net.SASL.GSSAPI.ServiceName = "kafka"
+			realmUsername := strings.Split(opts.principal, "@")
+			config.Net.SASL.GSSAPI.Username = realmUsername[0]
+			config.Net.SASL.GSSAPI.Realm = realmUsername[1]
+			config.Net.SASL.GSSAPI.AuthType = sarama.KRB5_KEYTAB_AUTH
+			config.Net.SASL.GSSAPI.KeyTabPath = opts.keytab
+			config.Net.SASL.GSSAPI.KerberosConfigPath = opts.krb5
+
 		default:
-			plog.Fatalf("invalid sasl mechanism \"%s\": can only be \"scram-sha256\", \"scram-sha512\" or \"plain\"", opts.saslMechanism)
+			plog.Fatalf("invalid sasl mechanism \"%s\": can only be \"scram-sha256\", \"scram-sha512\", gssapi or \"plain\"", opts.saslMechanism)
 		}
 
 		config.Net.SASL.Enable = true
@@ -194,6 +208,9 @@ func NewExporter(opts kafkaOpts, topicFilter string, groupFilter string) (*Expor
 
 	config.Metadata.RefreshFrequency = interval
 
+	sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
+	//var kerberosClient, _ = sarama.NewKerberosClient(&config.Net.SASL.GSSAPI)
+	//kerberosClient.Login()
 	client, err := sarama.NewClient(opts.uri, config)
 
 	if err != nil {
@@ -508,6 +525,9 @@ func main() {
 	kingpin.Flag("zookeeper.server", "Address (hosts) of zookeeper server.").Default("localhost:2181").StringsVar(&opts.uriZookeeper)
 	kingpin.Flag("kafka.labels", "Kafka cluster name").Default("").StringVar(&opts.labels)
 	kingpin.Flag("refresh.metadata", "Metadata refresh interval").Default("30s").StringVar(&opts.metadataRefreshInterval)
+	kingpin.Flag("krb5", "Kerberos Config Path").Default("").StringVar(&opts.krb5)
+	kingpin.Flag("keytab", "KeyTab Path").Default("").StringVar(&opts.keytab)
+	kingpin.Flag("principal", "PRINCIPAL").Default("").StringVar(&opts.principal)
 
 	plog.AddFlags(kingpin.CommandLine)
 	kingpin.Version(version.Print("kafka_exporter"))
